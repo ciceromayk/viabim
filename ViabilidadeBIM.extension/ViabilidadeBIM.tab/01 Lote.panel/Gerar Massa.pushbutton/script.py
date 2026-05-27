@@ -14,11 +14,10 @@ clr.AddReference('PresentationFramework')
 clr.AddReference('PresentationCore')
 clr.AddReference('WindowsBase')
 
-from System.Windows import Thickness, VerticalAlignment
+from System.Windows import Thickness, VerticalAlignment, GridLength, GridUnitType
 from System.Windows.Controls import (
     Label, TextBox, TextBlock, StackPanel, Grid, ColumnDefinition,
 )
-from System.Windows.Controls import GridLength, GridUnitType
 from System.Windows.Media import BrushConverter
 from ui import xaml_load
 from pyrevit import revit, forms as pvforms
