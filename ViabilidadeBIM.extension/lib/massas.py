@@ -268,6 +268,141 @@ def gerar_envelope(doc, lote, legislacao, n_pav_override=None):
     return el, env, niveis, lajes
 
 
+def calcular_envelope_forma(lote, legislacao, forma, params_forma=None):
+    """
+    Calcula areas e monta lista de blocos para uma forma especifica.
+    Retorna dict compativel com calcular_envelope() + chaves extras:
+      blocos, nome_forma
+    """
+    from formas import FormaTorreComBase
+
+    env = calcular_envelope(lote, legislacao)
+
+    if params_forma is None:
+        params_forma = {k: v['default'] for k, v in forma.params_schema.items()}
+
+    pe = env['pe_direito_m']
+    lc = env['largura_construivel_m']
+    pc = env['profundidade_construivel_m']
+    h  = env['gabarito_m']
+
+    if isinstance(forma, FormaTorreComBase):
+        bs = forma.blocos(lc, pc, h, params_forma, pe=pe)
+    else:
+        bs = forma.blocos(lc, pc, h, params_forma)
+
+    ap = sum(b['w'] * b['d'] for b in bs)
+    n  = env['pavimentos_max']
+
+    env2 = dict(env)
+    env2['blocos']             = bs
+    env2['nome_forma']         = forma.nome
+    env2['area_pavimento_m2']  = ap
+    env2['area_construida_m2'] = ap * n
+    env2['ca_utilizado']       = (ap * n) / env['area_lote_m2'] if env['area_lote_m2'] > 0 else 0
+    env2['to_utilizado']       = ap / env['area_lote_m2'] if env['area_lote_m2'] > 0 else 0
+    return env2
+
+
+def gerar_forma(doc, lote, legislacao, forma, params_forma=None, criar_niveis=True):
+    """
+    Gera DirectShapes para uma forma especifica.
+    Retorna (env_forma, lista_de_elementos).
+    """
+    env = calcular_envelope_forma(lote, legislacao, forma, params_forma)
+    rec = env['recuos_m']
+    ox_base = rec['lateral']
+    oy_base = rec['fundo']
+
+    elementos = []
+    nome_base = forma.nome + u' — ' + lote.get('nome', '')
+
+    with Transaction(doc, u'ViabilidadeBIM — ' + forma.nome) as t:
+        t.Start()
+        try:
+            criar_limite_lote(doc, lote, legislacao)
+        except Exception:
+            pass
+        for idx, b in enumerate(env['blocos']):
+            solid = _criar_solido(
+                b['w'], b['d'], b['h'],
+                ox_m=ox_base + b['ox'],
+                oy_m=oy_base + b['oy'],
+                oz_m=b.get('oz', 0.0),
+            )
+            label = nome_base if len(env['blocos']) == 1 else u'{} [{}]'.format(nome_base, idx + 1)
+            el = _inserir_directshape(doc, solid, label)
+            elementos.append(el)
+        t.Commit()
+
+    if criar_niveis:
+        criar_niveis_e_lajes(doc, env)
+
+    return env, elementos
+
+
+def gerar_todas_as_formas(doc, lote, legislacao, espacamento_m=10.0):
+    """
+    Gera todas as formas do catalogo lado a lado no modelo para comparacao.
+    Cada forma e deslocada em X pelo espacamento_m.
+    Retorna lista de (env_forma, elementos).
+    """
+    from formas import FORMAS, FormaTorreComBase
+
+    env_base   = calcular_envelope(lote, legislacao)
+    rec        = env_base['recuos_m']
+    lote_larg  = lote['largura_m']
+    resultados = []
+
+    for i, forma in enumerate(FORMAS):
+        params_pad = {k: v['default'] for k, v in forma.params_schema.items()}
+
+        pe = env_base['pe_direito_m']
+        lc = env_base['largura_construivel_m']
+        pc = env_base['profundidade_construivel_m']
+        h  = env_base['gabarito_m']
+
+        if isinstance(forma, FormaTorreComBase):
+            bs = forma.blocos(lc, pc, h, params_pad, pe=pe)
+        else:
+            bs = forma.blocos(lc, pc, h, params_pad)
+
+        ap  = sum(b['w'] * b['d'] for b in bs)
+        n   = env_base['pavimentos_max']
+        env = dict(env_base)
+        env['blocos']             = bs
+        env['nome_forma']         = forma.nome
+        env['area_pavimento_m2']  = ap
+        env['area_construida_m2'] = ap * n
+        env['ca_utilizado']       = (ap * n) / env['area_lote_m2'] if env['area_lote_m2'] > 0 else 0
+        env['to_utilizado']       = ap / env['area_lote_m2'] if env['area_lote_m2'] > 0 else 0
+
+        offset_x = i * (lote_larg + espacamento_m)
+        ox_base  = rec['lateral'] + offset_x
+        oy_base  = rec['fundo']
+        elementos = []
+
+        with Transaction(doc, u'ViabilidadeBIM — ' + forma.nome) as t:
+            t.Start()
+            for idx, b in enumerate(bs):
+                solid = _criar_solido(
+                    b['w'], b['d'], b['h'],
+                    ox_m=ox_base + b['ox'],
+                    oy_m=oy_base + b['oy'],
+                    oz_m=b.get('oz', 0.0),
+                )
+                label = u'{} [{}]'.format(forma.nome, idx + 1) if len(bs) > 1 else forma.nome
+                el = _inserir_directshape(doc, solid, label)
+                elementos.append(el)
+            t.Commit()
+
+        resultados.append((env, elementos))
+
+    # Cria niveis uma unica vez com base no envelope maximo
+    criar_niveis_e_lajes(doc, env_base)
+    return resultados
+
+
 def gerar_tipologias(doc, lote, legislacao):
     """Gera 4 tipologias volumetricas para comparacao."""
     env = calcular_envelope(lote, legislacao)
