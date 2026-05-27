@@ -104,11 +104,23 @@ def _criar_solido(largura_m, prof_m, altura_m, ox_m=0.0, oy_m=0.0, oz_m=0.0):
     return GeometryCreationUtilities.CreateExtrusionGeometry([loop], XYZ.BasisZ, h)
 
 
+def _sanitizar_nome(s):
+    """Remove/substitui caracteres proibidos pelo Revit em nomes de elementos."""
+    _PROIBIDOS = u'—–‒―'  # travessoes e tracoes Unicode
+    _PROIBIDOS_ASCII = u'\\:{}[]|;<>?`~'
+    for ch in _PROIBIDOS:
+        s = s.replace(ch, u'-')
+    for ch in _PROIBIDOS_ASCII:
+        s = s.replace(ch, u'')
+    s = s.strip()
+    return s if s else u'Massa'
+
+
 def _inserir_directshape(doc, solid, nome):
     cat = ElementId(BuiltInCategory.OST_Mass)
     ds  = DirectShape.CreateElement(doc, cat)
     ds.SetShape([solid])
-    ds.Name = nome
+    ds.Name = _sanitizar_nome(nome)
     return ds
 
 
@@ -196,7 +208,7 @@ def criar_niveis_e_lajes(doc, envelope):
 
             try:
                 nivel = Level.Create(doc, elev_pes)
-                nivel.Name = nome
+                nivel.Name = _sanitizar_nome(nome)
                 niveis_criados.append(nivel)
             except Exception:
                 pass
