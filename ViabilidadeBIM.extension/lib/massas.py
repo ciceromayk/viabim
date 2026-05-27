@@ -180,6 +180,7 @@ def criar_niveis_e_lajes(doc, envelope):
     lc       = envelope['largura_construivel_m']
     pc       = envelope['profundidade_construivel_m']
     esp_laje = 0.20
+    blocos   = envelope.get('blocos')  # None quando envelope simples (sem forma)
 
     niveis_criados = []
     lajes_criadas  = []
@@ -213,12 +214,28 @@ def criar_niveis_e_lajes(doc, envelope):
             except Exception:
                 pass
 
-            solid_laje = _criar_solido(lc, pc, esp_laje,
-                                       ox_m=rec['lateral'],
-                                       oy_m=rec['fundo'],
-                                       oz_m=elev_m)
-            laje = _inserir_directshape(doc, solid_laje, u'Laje - ' + nome)
-            lajes_criadas.append(laje)
+            if blocos:
+                # Cria uma laje por bloco da forma, apenas nos niveis que o bloco alcanca
+                for j, b in enumerate(blocos):
+                    b_oz = b.get('oz', 0.0)
+                    if b_oz <= elev_m <= b_oz + b['h']:
+                        solid_laje = _criar_solido(
+                            b['w'], b['d'], esp_laje,
+                            ox_m=rec['lateral'] + b['ox'],
+                            oy_m=rec['fundo']   + b['oy'],
+                            oz_m=elev_m,
+                        )
+                        label = (u'Laje - {} [{}]'.format(nome, j + 1)
+                                 if len(blocos) > 1 else u'Laje - ' + nome)
+                        laje = _inserir_directshape(doc, solid_laje, label)
+                        lajes_criadas.append(laje)
+            else:
+                solid_laje = _criar_solido(lc, pc, esp_laje,
+                                           ox_m=rec['lateral'],
+                                           oy_m=rec['fundo'],
+                                           oz_m=elev_m)
+                laje = _inserir_directshape(doc, solid_laje, u'Laje - ' + nome)
+                lajes_criadas.append(laje)
 
         t.Commit()
 
