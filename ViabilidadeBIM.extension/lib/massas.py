@@ -123,11 +123,6 @@ def _nome_nivel(i, n_total):
 # ── 1. Contorno do lote ───────────────────────────────────────────────────────
 
 def criar_limite_lote(doc, lote, legislacao):
-    """
-    Cria linhas de modelo mostrando:
-      - Contorno externo do lote (branco/solido)
-      - Area construivel apos recuos (tracejado)
-    """
     al  = lote['largura_m']
     ap  = lote['profundidade_m']
     p   = legislacao['parametros']
@@ -137,7 +132,7 @@ def criar_limite_lote(doc, lote, legislacao):
     ox  = rec['lateral']
     oy  = rec['fundo']
 
-    with Transaction(doc, u'ViabilidadeBIM — Limite do Lote') as t:
+    with Transaction(doc, u'ViabilidadeBIM - Limite do Lote') as t:
         t.Start()
         try:
             plane  = Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ(0, 0, 0))
@@ -148,13 +143,11 @@ def criar_limite_lote(doc, lote, legislacao):
                 p2 = XYZ(_m(x2), _m(y2), 0)
                 doc.Create.NewModelCurve(Line.CreateBound(p1, p2), sketch)
 
-            # Contorno do lote (4 segmentos)
             _seg(0,  0,  al, 0)
             _seg(al, 0,  al, ap)
             _seg(al, ap, 0,  ap)
             _seg(0,  ap, 0,  0)
 
-            # Area construivel apos recuos (4 segmentos)
             _seg(ox,      oy,      ox + lc, oy)
             _seg(ox + lc, oy,      ox + lc, oy + pc)
             _seg(ox + lc, oy + pc, ox,      oy + pc)
@@ -169,11 +162,6 @@ def criar_limite_lote(doc, lote, legislacao):
 # ── 2. Niveis e lajes ─────────────────────────────────────────────────────────
 
 def criar_niveis_e_lajes(doc, envelope):
-    """
-    1. Apaga TODOS os niveis existentes no projeto.
-    2. Cria um nivel por pavimento (Terreo → Cobertura).
-    3. Cria laje fina (DirectShape 20cm) em cada nivel.
-    """
     n_pav    = envelope['pavimentos_max']
     pe       = envelope['pe_direito_m']
     rec      = envelope['recuos_m']
@@ -184,10 +172,9 @@ def criar_niveis_e_lajes(doc, envelope):
     niveis_criados = []
     lajes_criadas  = []
 
-    with Transaction(doc, u'ViabilidadeBIM — Niveis e Lajes') as t:
+    with Transaction(doc, u'ViabilidadeBIM - Niveis e Lajes') as t:
         t.Start()
 
-        # ── Apagar todos os niveis existentes ──────────────────────────────
         existentes = FilteredElementCollector(doc).OfClass(Level).ToElements()
         ids = CsList[ElementId]()
         for lv in existentes:
@@ -196,20 +183,17 @@ def criar_niveis_e_lajes(doc, envelope):
             try:
                 doc.Delete(ids)
             except Exception:
-                # Tenta um por um se a exclusao em lote falhar
                 for lv_id in list(ids):
                     try:
                         doc.Delete(lv_id)
                     except Exception:
                         pass
 
-        # ── Criar niveis e lajes ───────────────────────────────────────────
         for i in range(n_pav + 1):
             elev_m   = i * pe
             elev_pes = _m(elev_m)
             nome     = _nome_nivel(i, n_pav)
 
-            # Nivel
             try:
                 nivel = Level.Create(doc, elev_pes)
                 nivel.Name = nome
@@ -217,12 +201,11 @@ def criar_niveis_e_lajes(doc, envelope):
             except Exception:
                 pass
 
-            # Laje fina em cada piso
             solid_laje = _criar_solido(lc, pc, esp_laje,
                                        ox_m=rec['lateral'],
                                        oy_m=rec['fundo'],
                                        oz_m=elev_m)
-            laje = _inserir_directshape(doc, solid_laje, u'Laje — ' + nome)
+            laje = _inserir_directshape(doc, solid_laje, u'Laje - ' + nome)
             lajes_criadas.append(laje)
 
         t.Commit()
@@ -233,47 +216,30 @@ def criar_niveis_e_lajes(doc, envelope):
 # ── 3. Operacoes de alto nivel ────────────────────────────────────────────────
 
 def gerar_envelope(doc, lote, legislacao, n_pav_override=None):
-    """
-    Sequencia completa:
-      1. Linhas de contorno do lote
-      2. Massa (envelope construtivo maximo)
-      3. Niveis (apaga existentes e recria)
-      4. Lajes por pavimento
-    Retorna (elemento_massa, dict_envelope, niveis, lajes).
-    """
     env = calcular_envelope(lote, legislacao)
     rec = env['recuos_m']
     n   = n_pav_override if n_pav_override else env['pavimentos_max']
     h   = n * env['pe_direito_m']
 
-    # 1. Contorno do lote
     try:
         criar_limite_lote(doc, lote, legislacao)
     except Exception:
-        pass  # Nao interrompe se linhas falharem (ex: sem vista ativa)
+        pass
 
-    # 2. Massa envelope
-    with Transaction(doc, u'ViabilidadeBIM — Envelope') as t:
+    with Transaction(doc, u'ViabilidadeBIM - Envelope') as t:
         t.Start()
         solid = _criar_solido(env['largura_construivel_m'],
                               env['profundidade_construivel_m'],
                               h, ox_m=rec['lateral'], oy_m=rec['fundo'])
         el = _inserir_directshape(doc, solid,
-                                  u'Envelope Maximo — ' + lote.get('nome', ''))
+                                  u'Envelope Maximo - ' + lote.get('nome', ''))
         t.Commit()
 
-    # 3 + 4. Niveis e lajes
     niveis, lajes = criar_niveis_e_lajes(doc, env)
-
     return el, env, niveis, lajes
 
 
 def calcular_envelope_forma(lote, legislacao, forma, params_forma=None):
-    """
-    Calcula areas e monta lista de blocos para uma forma especifica.
-    Retorna dict compativel com calcular_envelope() + chaves extras:
-      blocos, nome_forma
-    """
     from formas import FormaTorreComBase
 
     env = calcular_envelope(lote, legislacao)
@@ -305,19 +271,15 @@ def calcular_envelope_forma(lote, legislacao, forma, params_forma=None):
 
 
 def gerar_forma(doc, lote, legislacao, forma, params_forma=None, criar_niveis=True):
-    """
-    Gera DirectShapes para uma forma especifica.
-    Retorna (env_forma, lista_de_elementos).
-    """
     env = calcular_envelope_forma(lote, legislacao, forma, params_forma)
     rec = env['recuos_m']
     ox_base = rec['lateral']
     oy_base = rec['fundo']
 
     elementos = []
-    nome_base = forma.nome + u' — ' + lote.get('nome', '')
+    nome_base = forma.nome + u' - ' + lote.get('nome', '')
 
-    with Transaction(doc, u'ViabilidadeBIM — ' + forma.nome) as t:
+    with Transaction(doc, u'ViabilidadeBIM - ' + forma.nome) as t:
         t.Start()
         try:
             criar_limite_lote(doc, lote, legislacao)
@@ -342,11 +304,6 @@ def gerar_forma(doc, lote, legislacao, forma, params_forma=None, criar_niveis=Tr
 
 
 def gerar_todas_as_formas(doc, lote, legislacao, espacamento_m=10.0):
-    """
-    Gera todas as formas do catalogo lado a lado no modelo para comparacao.
-    Cada forma e deslocada em X pelo espacamento_m.
-    Retorna lista de (env_forma, elementos).
-    """
     from formas import FORMAS, FormaTorreComBase
 
     env_base   = calcular_envelope(lote, legislacao)
@@ -378,17 +335,17 @@ def gerar_todas_as_formas(doc, lote, legislacao, espacamento_m=10.0):
         env['to_utilizado']       = ap / env['area_lote_m2'] if env['area_lote_m2'] > 0 else 0
 
         offset_x = i * (lote_larg + espacamento_m)
-        ox_base  = rec['lateral'] + offset_x
-        oy_base  = rec['fundo']
+        ox_base_i = rec['lateral'] + offset_x
+        oy_base_i = rec['fundo']
         elementos = []
 
-        with Transaction(doc, u'ViabilidadeBIM — ' + forma.nome) as t:
+        with Transaction(doc, u'ViabilidadeBIM - ' + forma.nome) as t:
             t.Start()
             for idx, b in enumerate(bs):
                 solid = _criar_solido(
                     b['w'], b['d'], b['h'],
-                    ox_m=ox_base + b['ox'],
-                    oy_m=oy_base + b['oy'],
+                    ox_m=ox_base_i + b['ox'],
+                    oy_m=oy_base_i + b['oy'],
                     oz_m=b.get('oz', 0.0),
                 )
                 label = u'{} [{}]'.format(forma.nome, idx + 1) if len(bs) > 1 else forma.nome
@@ -398,7 +355,6 @@ def gerar_todas_as_formas(doc, lote, legislacao, espacamento_m=10.0):
 
         resultados.append((env, elementos))
 
-    # Cria niveis uma unica vez com base no envelope maximo
     criar_niveis_e_lajes(doc, env_base)
     return resultados
 
@@ -415,7 +371,7 @@ def gerar_tipologias(doc, lote, legislacao):
 
     tipologias = []
 
-    with Transaction(doc, u'ViabilidadeBIM — Tipologias') as t:
+    with Transaction(doc, u'ViabilidadeBIM - Tipologias') as t:
         t.Start()
 
         ap1 = lc * pc
@@ -446,12 +402,12 @@ def gerar_tipologias(doc, lote, legislacao):
         ew  = lc * 0.28
         ap4 = (ew * pc) * 2 + (lc - 2 * ew) * pc * 0.35
         _inserir_directshape(doc, _criar_solido(ew, pc, n4 * pe,
-                             rec['lateral'], rec['fundo']), u'T4 - Forma U (esq)')
+                             rec['lateral'], rec['fundo']), u'T4 - Forma U esq')
         _inserir_directshape(doc, _criar_solido(ew, pc, n4 * pe,
-                             rec['lateral'] + lc - ew, rec['fundo']), u'T4 - Forma U (dir)')
+                             rec['lateral'] + lc - ew, rec['fundo']), u'T4 - Forma U dir')
         e4 = _inserir_directshape(doc, _criar_solido(lc - 2*ew, pc*0.35, n4*pe,
                                   rec['lateral'] + ew, rec['fundo'] + pc*0.65),
-                                  u'T4 - Forma U (fundo)')
+                                  u'T4 - Forma U fundo')
         tipologias.append({'elemento': e4, 'nome': u'T4 Forma em U',
                            'area_pavimento_m2': ap4, 'pavimentos': n4,
                            'area_construida_m2': ap4 * n4})
