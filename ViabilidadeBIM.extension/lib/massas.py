@@ -104,11 +104,23 @@ def _criar_solido(largura_m, prof_m, altura_m, ox_m=0.0, oy_m=0.0, oz_m=0.0):
     return GeometryCreationUtilities.CreateExtrusionGeometry([loop], XYZ.BasisZ, h)
 
 
+def _sanitizar_nome(s):
+    """Remove/substitui caracteres proibidos pelo Revit em nomes de elementos."""
+    _PROIBIDOS = u'—–‒―'  # travessoes e tracoes Unicode
+    _PROIBIDOS_ASCII = u'\\:{}[]|;<>?`~'
+    for ch in _PROIBIDOS:
+        s = s.replace(ch, u'-')
+    for ch in _PROIBIDOS_ASCII:
+        s = s.replace(ch, u'')
+    s = s.strip()
+    return s if s else u'Massa'
+
+
 def _inserir_directshape(doc, solid, nome):
     cat = ElementId(BuiltInCategory.OST_Mass)
     ds  = DirectShape.CreateElement(doc, cat)
     ds.SetShape([solid])
-    ds.Name = nome
+    ds.Name = _sanitizar_nome(nome)
     return ds
 
 
@@ -123,11 +135,6 @@ def _nome_nivel(i, n_total):
 # ── 1. Contorno do lote ───────────────────────────────────────────────────────
 
 def criar_limite_lote(doc, lote, legislacao):
-    """
-    Cria linhas de modelo mostrando:
-      - Contorno externo do lote (branco/solido)
-      - Area construivel apos recuos (tracejado)
-    """
     al  = lote['largura_m']
     ap  = lote['profundidade_m']
     p   = legislacao['parametros']
@@ -137,7 +144,7 @@ def criar_limite_lote(doc, lote, legislacao):
     ox  = rec['lateral']
     oy  = rec['fundo']
 
-    with Transaction(doc, u'ViabilidadeBIM — Limite do Lote') as t:
+    with Transaction(doc, u'ViabilidadeBIM - Limite do Lote') as t:
         t.Start()
         try:
             plane  = Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ(0, 0, 0))
@@ -148,13 +155,11 @@ def criar_limite_lote(doc, lote, legislacao):
                 p2 = XYZ(_m(x2), _m(y2), 0)
                 doc.Create.NewModelCurve(Line.CreateBound(p1, p2), sketch)
 
-            # Contorno do lote (4 segmentos)
             _seg(0,  0,  al, 0)
             _seg(al, 0,  al, ap)
             _seg(al, ap, 0,  ap)
             _seg(0,  ap, 0,  0)
 
-            # Area construivel apos recuos (4 segmentos)
             _seg(ox,      oy,      ox + lc, oy)
             _seg(ox + lc, oy,      ox + lc, oy + pc)
             _seg(ox + lc, oy + pc, ox,      oy + pc)
@@ -169,25 +174,20 @@ def criar_limite_lote(doc, lote, legislacao):
 # ── 2. Niveis e lajes ─────────────────────────────────────────────────────────
 
 def criar_niveis_e_lajes(doc, envelope):
-    """
-    1. Apaga TODOS os niveis existentes no projeto.
-    2. Cria um nivel por pavimento (Terreo → Cobertura).
-    3. Cria laje fina (DirectShape 20cm) em cada nivel.
-    """
     n_pav    = envelope['pavimentos_max']
     pe       = envelope['pe_direito_m']
     rec      = envelope['recuos_m']
     lc       = envelope['largura_construivel_m']
     pc       = envelope['profundidade_construivel_m']
     esp_laje = 0.20
+    blocos   = envelope.get('blocos')  # None quando envelope simples (sem forma)
 
     niveis_criados = []
     lajes_criadas  = []
 
-    with Transaction(doc, u'ViabilidadeBIM — Niveis e Lajes') as t:
+    with Transaction(doc, u'ViabilidadeBIM - Niveis e Lajes') as t:
         t.Start()
 
-        # ── Apagar todos os niveis existentes ──────────────────────────────
         existentes = FilteredElementCollector(doc).OfClass(Level).ToElements()
         ids = CsList[ElementId]()
         for lv in existentes:
@@ -196,34 +196,46 @@ def criar_niveis_e_lajes(doc, envelope):
             try:
                 doc.Delete(ids)
             except Exception:
-                # Tenta um por um se a exclusao em lote falhar
                 for lv_id in list(ids):
                     try:
                         doc.Delete(lv_id)
                     except Exception:
                         pass
 
-        # ── Criar niveis e lajes ───────────────────────────────────────────
         for i in range(n_pav + 1):
             elev_m   = i * pe
             elev_pes = _m(elev_m)
             nome     = _nome_nivel(i, n_pav)
 
-            # Nivel
             try:
                 nivel = Level.Create(doc, elev_pes)
-                nivel.Name = nome
+                nivel.Name = _sanitizar_nome(nome)
                 niveis_criados.append(nivel)
             except Exception:
                 pass
 
-            # Laje fina em cada piso
-            solid_laje = _criar_solido(lc, pc, esp_laje,
-                                       ox_m=rec['lateral'],
-                                       oy_m=rec['fundo'],
-                                       oz_m=elev_m)
-            laje = _inserir_directshape(doc, solid_laje, u'Laje — ' + nome)
-            lajes_criadas.append(laje)
+            if blocos:
+                # Cria uma laje por bloco da forma, apenas nos niveis que o bloco alcanca
+                for j, b in enumerate(blocos):
+                    b_oz = b.get('oz', 0.0)
+                    if b_oz <= elev_m <= b_oz + b['h']:
+                        solid_laje = _criar_solido(
+                            b['w'], b['d'], esp_laje,
+                            ox_m=rec['lateral'] + b['ox'],
+                            oy_m=rec['fundo']   + b['oy'],
+                            oz_m=elev_m,
+                        )
+                        label = (u'Laje - {} [{}]'.format(nome, j + 1)
+                                 if len(blocos) > 1 else u'Laje - ' + nome)
+                        laje = _inserir_directshape(doc, solid_laje, label)
+                        lajes_criadas.append(laje)
+            else:
+                solid_laje = _criar_solido(lc, pc, esp_laje,
+                                           ox_m=rec['lateral'],
+                                           oy_m=rec['fundo'],
+                                           oz_m=elev_m)
+                laje = _inserir_directshape(doc, solid_laje, u'Laje - ' + nome)
+                lajes_criadas.append(laje)
 
         t.Commit()
 
@@ -233,39 +245,147 @@ def criar_niveis_e_lajes(doc, envelope):
 # ── 3. Operacoes de alto nivel ────────────────────────────────────────────────
 
 def gerar_envelope(doc, lote, legislacao, n_pav_override=None):
-    """
-    Sequencia completa:
-      1. Linhas de contorno do lote
-      2. Massa (envelope construtivo maximo)
-      3. Niveis (apaga existentes e recria)
-      4. Lajes por pavimento
-    Retorna (elemento_massa, dict_envelope, niveis, lajes).
-    """
     env = calcular_envelope(lote, legislacao)
     rec = env['recuos_m']
     n   = n_pav_override if n_pav_override else env['pavimentos_max']
     h   = n * env['pe_direito_m']
 
-    # 1. Contorno do lote
     try:
         criar_limite_lote(doc, lote, legislacao)
     except Exception:
-        pass  # Nao interrompe se linhas falharem (ex: sem vista ativa)
+        pass
 
-    # 2. Massa envelope
-    with Transaction(doc, u'ViabilidadeBIM — Envelope') as t:
+    with Transaction(doc, u'ViabilidadeBIM - Envelope') as t:
         t.Start()
         solid = _criar_solido(env['largura_construivel_m'],
                               env['profundidade_construivel_m'],
                               h, ox_m=rec['lateral'], oy_m=rec['fundo'])
         el = _inserir_directshape(doc, solid,
-                                  u'Envelope Maximo — ' + lote.get('nome', ''))
+                                  u'Envelope Maximo - ' + lote.get('nome', ''))
         t.Commit()
 
-    # 3 + 4. Niveis e lajes
     niveis, lajes = criar_niveis_e_lajes(doc, env)
-
     return el, env, niveis, lajes
+
+
+def calcular_envelope_forma(lote, legislacao, forma, params_forma=None):
+    from formas import FormaTorreComBase
+
+    env = calcular_envelope(lote, legislacao)
+
+    if params_forma is None:
+        params_forma = {k: v['default'] for k, v in forma.params_schema.items()}
+
+    pe = env['pe_direito_m']
+    lc = env['largura_construivel_m']
+    pc = env['profundidade_construivel_m']
+    h  = env['gabarito_m']
+
+    if isinstance(forma, FormaTorreComBase):
+        bs = forma.blocos(lc, pc, h, params_forma, pe=pe)
+    else:
+        bs = forma.blocos(lc, pc, h, params_forma)
+
+    ap = sum(b['w'] * b['d'] for b in bs)
+    n  = env['pavimentos_max']
+
+    env2 = dict(env)
+    env2['blocos']             = bs
+    env2['nome_forma']         = forma.nome
+    env2['area_pavimento_m2']  = ap
+    env2['area_construida_m2'] = ap * n
+    env2['ca_utilizado']       = (ap * n) / env['area_lote_m2'] if env['area_lote_m2'] > 0 else 0
+    env2['to_utilizado']       = ap / env['area_lote_m2'] if env['area_lote_m2'] > 0 else 0
+    return env2
+
+
+def gerar_forma(doc, lote, legislacao, forma, params_forma=None, criar_niveis=True):
+    env = calcular_envelope_forma(lote, legislacao, forma, params_forma)
+    rec = env['recuos_m']
+    ox_base = rec['lateral']
+    oy_base = rec['fundo']
+
+    elementos = []
+    nome_base = forma.nome + u' - ' + lote.get('nome', '')
+
+    with Transaction(doc, u'ViabilidadeBIM - ' + forma.nome) as t:
+        t.Start()
+        try:
+            criar_limite_lote(doc, lote, legislacao)
+        except Exception:
+            pass
+        for idx, b in enumerate(env['blocos']):
+            solid = _criar_solido(
+                b['w'], b['d'], b['h'],
+                ox_m=ox_base + b['ox'],
+                oy_m=oy_base + b['oy'],
+                oz_m=b.get('oz', 0.0),
+            )
+            label = nome_base if len(env['blocos']) == 1 else u'{} [{}]'.format(nome_base, idx + 1)
+            el = _inserir_directshape(doc, solid, label)
+            elementos.append(el)
+        t.Commit()
+
+    if criar_niveis:
+        criar_niveis_e_lajes(doc, env)
+
+    return env, elementos
+
+
+def gerar_todas_as_formas(doc, lote, legislacao, espacamento_m=10.0):
+    from formas import FORMAS, FormaTorreComBase
+
+    env_base   = calcular_envelope(lote, legislacao)
+    rec        = env_base['recuos_m']
+    lote_larg  = lote['largura_m']
+    resultados = []
+
+    for i, forma in enumerate(FORMAS):
+        params_pad = {k: v['default'] for k, v in forma.params_schema.items()}
+
+        pe = env_base['pe_direito_m']
+        lc = env_base['largura_construivel_m']
+        pc = env_base['profundidade_construivel_m']
+        h  = env_base['gabarito_m']
+
+        if isinstance(forma, FormaTorreComBase):
+            bs = forma.blocos(lc, pc, h, params_pad, pe=pe)
+        else:
+            bs = forma.blocos(lc, pc, h, params_pad)
+
+        ap  = sum(b['w'] * b['d'] for b in bs)
+        n   = env_base['pavimentos_max']
+        env = dict(env_base)
+        env['blocos']             = bs
+        env['nome_forma']         = forma.nome
+        env['area_pavimento_m2']  = ap
+        env['area_construida_m2'] = ap * n
+        env['ca_utilizado']       = (ap * n) / env['area_lote_m2'] if env['area_lote_m2'] > 0 else 0
+        env['to_utilizado']       = ap / env['area_lote_m2'] if env['area_lote_m2'] > 0 else 0
+
+        offset_x = i * (lote_larg + espacamento_m)
+        ox_base_i = rec['lateral'] + offset_x
+        oy_base_i = rec['fundo']
+        elementos = []
+
+        with Transaction(doc, u'ViabilidadeBIM - ' + forma.nome) as t:
+            t.Start()
+            for idx, b in enumerate(bs):
+                solid = _criar_solido(
+                    b['w'], b['d'], b['h'],
+                    ox_m=ox_base_i + b['ox'],
+                    oy_m=oy_base_i + b['oy'],
+                    oz_m=b.get('oz', 0.0),
+                )
+                label = u'{} [{}]'.format(forma.nome, idx + 1) if len(bs) > 1 else forma.nome
+                el = _inserir_directshape(doc, solid, label)
+                elementos.append(el)
+            t.Commit()
+
+        resultados.append((env, elementos))
+
+    criar_niveis_e_lajes(doc, env_base)
+    return resultados
 
 
 def gerar_tipologias(doc, lote, legislacao):
@@ -280,7 +400,7 @@ def gerar_tipologias(doc, lote, legislacao):
 
     tipologias = []
 
-    with Transaction(doc, u'ViabilidadeBIM — Tipologias') as t:
+    with Transaction(doc, u'ViabilidadeBIM - Tipologias') as t:
         t.Start()
 
         ap1 = lc * pc
@@ -311,12 +431,12 @@ def gerar_tipologias(doc, lote, legislacao):
         ew  = lc * 0.28
         ap4 = (ew * pc) * 2 + (lc - 2 * ew) * pc * 0.35
         _inserir_directshape(doc, _criar_solido(ew, pc, n4 * pe,
-                             rec['lateral'], rec['fundo']), u'T4 - Forma U (esq)')
+                             rec['lateral'], rec['fundo']), u'T4 - Forma U esq')
         _inserir_directshape(doc, _criar_solido(ew, pc, n4 * pe,
-                             rec['lateral'] + lc - ew, rec['fundo']), u'T4 - Forma U (dir)')
+                             rec['lateral'] + lc - ew, rec['fundo']), u'T4 - Forma U dir')
         e4 = _inserir_directshape(doc, _criar_solido(lc - 2*ew, pc*0.35, n4*pe,
                                   rec['lateral'] + ew, rec['fundo'] + pc*0.65),
-                                  u'T4 - Forma U (fundo)')
+                                  u'T4 - Forma U fundo')
         tipologias.append({'elemento': e4, 'nome': u'T4 Forma em U',
                            'area_pavimento_m2': ap4, 'pavimentos': n4,
                            'area_construida_m2': ap4 * n4})
